@@ -1,6 +1,7 @@
 import math
 import torch
 import numpy as np
+from copy import copy
 
 
 class Point:
@@ -8,23 +9,15 @@ class Point:
         self.x = x
         self.y = y
 
-    def __getitem__(self, item):
-        if item == 0 or item == 'x':
-            return self.x
-        elif item == 1 or item == 'y':
-            return self.y
-        else:
-            raise IndexError()
+    def copy(self):
+        return Point(copy(self.x), copy(self.y))
 
-    def __setitem__(self, item, value):
-        if item == 0 or item == 'x':
-            self.x = value
-        elif item == 1 or item == 'y':
-            self.y = value
-        else:
-            raise IndexError()
+    def __getitem__(self, item):
+        return Point(self.x[item], self.y[item])
 
     def __repr__(self):
+        if isinstance(self.x, (np.ndarray, torch.Tensor)) and len(self.x.shape) != 0:
+            return f'Point(shape={self.x.shape})'
         return f'(x={self.x:.2f}, y={self.y:.2f})'
 
     def __iter__(self):
@@ -35,7 +28,7 @@ class Point:
         return 2
 
     def __mul__(self, other):
-        if isinstance(other, (int, float)):
+        if isinstance(other, (int, float, np.ndarray, torch.Tensor)):
             return Point(self.x*other, self.y*other)
         elif isinstance(other, Point):
             return Point(self.x*other.x, self.y*other.y)
@@ -43,7 +36,7 @@ class Point:
             raise TypeError()
 
     def __truediv__(self, other):
-        if isinstance(other, (int, float)):
+        if isinstance(other, (int, float, np.ndarray, torch.Tensor)):
             return Point(self.x/other, self.y/other)
         elif isinstance(other, Point):
             return Point(self.x/other.x, self.y/other.y)
@@ -51,7 +44,7 @@ class Point:
             raise TypeError()
 
     def __rtruediv__(self, other):
-        if isinstance(other, (int, float)):
+        if isinstance(other, (int, float, np.ndarray, torch.Tensor)):
             return Point(other/self.x, other/self.y)
         elif isinstance(other, Point):
             return Point(other.x/self.x, other.y/self.y)
@@ -59,7 +52,7 @@ class Point:
             raise TypeError()
 
     def __add__(self, other):
-        if isinstance(other, (int, float)):
+        if isinstance(other, (int, float, np.ndarray, torch.Tensor)):
             return Point(self.x+other, self.y+other)
         elif isinstance(other, Point):
             return Point(self.x+other.x, self.y+other.y)
@@ -67,7 +60,7 @@ class Point:
             raise TypeError()
 
     def __sub__(self, other):
-        if isinstance(other, (int, float)):
+        if isinstance(other, (int, float, np.ndarray, torch.Tensor)):
             return Point(self.x-other, self.y-other)
         elif isinstance(other, Point):
             return Point(self.x-other.x, self.y-other.y)
@@ -75,23 +68,37 @@ class Point:
             raise TypeError()
 
     def __rsub__(self, other):
-        if isinstance(other, (int, float)):
+        if isinstance(other, (int, float, np.ndarray, torch.Tensor)):
             return Point(other-self.x, other-self.y)
         elif isinstance(other, Point):
             return Point(other.x-self.x, other.y-self.y)
         else:
             raise TypeError()
 
+    @property
+    def shape(self):
+        if isinstance(self.x, (int, float, np.ndarray, torch.Tensor)):
+            return self.x.shape
+        else:
+            return ()
+
     def vec_prod(self, other):
         return self.x*other.y-self.y*other.x
 
     def dot(self, other):
-        x, y = np.dot(self, other)
+        if isinstance(self.x, torch.Tensor):
+            x, y = torch.dot(self, other)
+        else:
+            x, y = np.dot(self, other)
         return Point(x, y)
 
     def norm(self):
-        return np.linalg.norm(self)
-
+        if isinstance(self.x, torch.Tensor):
+            xy = torch.stack([self.x, self.y])
+            return torch.linalg.norm(xy, axis=0)
+        xy = np.stack(self)
+        return np.linalg.norm(xy, axis=0)
+        
     def unitary(self):
         return self / self.norm()
 
@@ -137,7 +144,7 @@ class PointAttr:
         return getattr(obj, '_'+self.name)
 
 
-class Line:
+class Lines:
     A = PointAttr()
     B = PointAttr()
 
@@ -147,14 +154,31 @@ class Line:
 
     def __repr__(self):
         return f'Line: {self.A} - {self.B}'
+    
+    def __getitem__(self, item):
+        return Lines(self.A[item], self.B[item])
 
     def _distance_field(self, h, w, scale=1, roundtip=False, device=None):
-        a = self.A
-        b = self.B
+        a = self.A.copy()
+        b = self.B.copy()
         u = (b-a).unitary()
         offset = (1-1/scale)/2
         x, y = torch.meshgrid(torch.arange(-offset, h-offset, 1/scale, device=device),
                               torch.arange(-offset, w-offset, 1/scale, device=device))
+        if isinstance(a.x, (np.ndarray, torch.Tensor)):
+            for _ in range(len(a.x.shape)):
+                x = x[None]
+                y = y[None]
+        def expand_dims(p):
+            if isinstance(p.x, (np.ndarray, torch.Tensor)):
+                p.x = p.x[..., None, None]
+            if isinstance(p.y, (np.ndarray, torch.Tensor)):
+                p.y = p.y[..., None, None]
+            return p
+        u = expand_dims(u)
+        a = expand_dims(a)
+        b = expand_dims(b)
+
         d = u.x*(y-a.y) - u.y*(x-a.x)
 
         a_halfplane = (x-a.x)*u.x + (y-a.y)*u.y < 0
@@ -166,24 +190,25 @@ class Line:
                 d[b_halfplane] = torch.sqrt(torch.square(x[b_halfplane]-b.x)+torch.square(y[b_halfplane]-b.y))
             elif roundtip.lower() == 'a':
                 d[a_halfplane] = torch.sqrt(torch.square(x[a_halfplane]-a.x)+torch.square(y[a_halfplane]-a.y))
-                d[b_halfplane] = np.nan
+                d[b_halfplane] = np.inf
             elif roundtip.lower() == 'b':
-                d[a_halfplane] = np.nan
+                d[a_halfplane] = np.inf
                 d[b_halfplane] = torch.sqrt(torch.square(x[b_halfplane]-b.x)+torch.square(y[b_halfplane]-b.y))
             else:
                 roundtip = False
         if not roundtip:
             halfplanes = a_halfplane | b_halfplane
-            d[halfplanes] = np.nan
+            d[halfplanes] = np.inf
         return d
 
     def draw_line(self, h, w, subsample=1, width=3, profile=None, roundtip=False, device=None):
         d = self._distance_field(h, w, subsample, roundtip, device=device)
-        return Line.dist_to_line(d, subsample=subsample, width=width, profile=profile)
+        return Lines.dist_to_line(d, subsample=subsample, width=width, profile=profile)
 
     @staticmethod
-    def dist_to_line(d, subsample=1, width=3, profile=None):
-        d = d/width
+    def dist_to_line(d, subsample=1, width=None, profile=None):
+        if width:
+            d = d/width
         if profile is None:
             p = torch.abs(d) <= .5
         else:
@@ -222,7 +247,7 @@ class Line:
             return skeleton & domain
 
 
-class QuadBezierLine(Line):
+class QuadBezierLine(Lines):
     C = PointAttr()
 
     def __init__(self, a, b, c):
