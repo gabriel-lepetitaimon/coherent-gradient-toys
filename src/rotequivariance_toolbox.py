@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from typing import Union
+from typing import Union, Tuple
 
 
 def cartesian_space(size, center=None, device=None):
@@ -116,65 +116,71 @@ def polar_spectral_power(arr: '.hw', theta=8, plot=False, split=False, mask=None
 
 
 class SpectralPower:
-    def __init__(self, sp, sym_phase, asym_phase):
-        self._fft = fft_signal
-        self._sp = None
-        self._arg = None
+    def __init__(self, sp, args_hist):
+        self._sp = sp
+        self._args_hist = args_hist
+
+    def __copy__(self):
+        return SpectralPower(self._sp, self._args_hist)
 
     #   ---  Spectral Properties   ---
     @property
-    def fft_signal(self):
-        return self._fft
-
-    @property
     def sp(self):
-        if self._sp is None:
-            self._sp = abs(self._fft)**2
         return self._sp
 
     @property
-    def arg(self):
-        if self._arg is None:
-            self._arg = abs(self._fft)**2
-        return self._arg
-
-    @property
-    def sym_phase(self):
-        return self.arg[1]
+    def args_hist(self):
+        return self._args_hist
 
     @property
     def asym_phase(self):
-        return self.arg[2]
+        return self._args_hist[1]
+
+    @property
+    def sym_phase(self):
+        return self._args_hist[2]
 
     @property
     def shape(self):
-        return self._fft.shape[1:]
+        return self._sp.shape[1:]
 
     #   ---  Operators   ---
     def __add__(self, other):
         if isinstance(other, SpectralPower):
-            return SpectralPower(fft_signal=self._fft+other._fft)
+            r = self.__copy__()
+            r += other
+            return r
+        raise TypeError
 
     def __iadd__(self, other):
         if isinstance(other, SpectralPower):
-            self._fft += other._fft
-            self._arg = None
-            self._sp = None
+            self._sp += other._sp
+            for i, (arg_own, arg_other) in enumerate(zip(self._args_hist, other._args_hist)):
+                if arg_other is None:
+                    continue
+                elif arg_own is None:
+                    self._args_hist[i] = arg_other
+                else:
+                    self._args_hist[i] += arg_other
+        raise TypeError
 
     def __getitem__(self, item):
         if isinstance(item, tuple):
-            item = (slice(None),)+item
-            return SpectralPower(self._fft[item])
+            expended_item = (slice(None),)+item
         elif isinstance(item, int):
-            return SpectralPower(self._fft[:, item])
-        raise IndexError(f'Invalid index: {item}')
+            expended_item = (slice(None), item)
+        else:
+            raise IndexError(f'Invalid index: {item}')
+        return SpectralPower(self._sp[expended_item],
+                             [None if _ is None else _[item] for _ in self._args_hist])
 
     #   ---  CREATOR   ---
     @staticmethod
-    def spectral_power(signal: torch.Tensor, mask: Union[str, torch.Tensor] = None, merged_dim=None):
+    def spectral_power(signal: torch.Tensor, mask: Union[str, torch.Tensor] = None,
+                       merged_dim: Union[int, Tuple[int]] = None):
         """
         Compute the spectral power of a signal.
-        :param signal: Shape []
+        :param signal: Shape [θ ...]
         :param mask:
         :param merged_dim: Dimension summed. If None, by default the two last dimensions are merged if signal as more
                            than 2 dimensions, the last one otherwise.
@@ -192,17 +198,16 @@ class SpectralPower:
             x, y = cartesian_space(signal.shape[-2:])
             mask = (x+y) < min(signal.shape[-2:])/2
         if mask is not None:
-            if mask.dtype != np.bool:
+            if mask.dtype != torch.bool:
                 mask = mask > 0
             signal = signal[..., mask != 0]
 
         fft_signal = fft(signal, axis=0)
-        spe = abs(spe) ** 2
-        if split:
-            spe = spe.reshape(spe.shape[:2] + (-1,)).sum(axis=-1)
-        else:
-            spe = spe.reshape(spe.shape[:1] + (-1,)).sum(axis=1)
-        return SpectralPower(fft)
+
+        sp  = (torch.abs(fft_signal) ** 2).sum(axis=merged_dim)
+        args = fft_signal[1:2].angle().sum(axis=merged_dim)
+        args = [None] + [args[_] for _ in range(2)]
+        return SpectralPower(sp, args)
 
     @staticmethod
     def polar_spectral_power(self, signal):
