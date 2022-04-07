@@ -7,8 +7,15 @@ from src.models.model import Model
 from src.lines_generators.sample_generator import SampleGenerator
 import time
 
+
+def binary_dice_loss(pred, target, eps=1e-6):
+    pred = torch.sigmoid(pred)
+    dice = 2*torch.sum(pred*target)/(torch.sum(pred+target)+eps)
+    return 1-dice
+
+
 class Experiment:
-    def __init__(self, net: Model, gen_opt=None, loss=F.binary_cross_entropy_with_logits) -> None:
+    def __init__(self, net: Model, gen_opt=None, loss=binary_dice_loss, gen2_opt=None) -> None:
         self.net = net.cuda()
 
         self.gen_opt = dict(
@@ -19,14 +26,28 @@ class Experiment:
         if gen_opt is not None:
             self.gen_opt.update(gen_opt)
         self.samples_generator = SampleGenerator(5, 10, **self.gen_opt)
+
+        if gen2_opt:
+            def_secondary_gen_opt = dict(
+                profile=default_profile,
+                orientation=default_orientation,
+                length=default_length
+            )
+            def_secondary_gen_opt.update(gen2_opt)
+            self.secondary_generator = SampleGenerator(5, 10, **def_secondary_gen_opt)
+            self.secondary_gen_mix = 0.5 if 'mix' not in gen2_opt else gen2_opt['mix']
+        else:
+            self.secondary_generator = None
+            self.secondary_gen_mix = 0
+
         self.noise_std = .4
         self.noise_avg = .5
 
         self.loss = loss
-        self.lr = 1e-3
+        self.lr = 2e-2
         self.batchsize = 16
-        self.early_stopping_delay = 10
-        self.early_stopping_delta = 1e-3
+        self.early_stopping_delay = 15
+        self.early_stopping_delta = .5e-3
         self.sample_height = 256
 
         self.train_iterations = 0
@@ -61,11 +82,8 @@ class Experiment:
             if self.train_iterations % 10 == 0:
                 if verbose:
                     print(f'[{self.train_iterations}] loss={loss:.3f}')
-                self.training_logs = self.training_logs.append([
-                    {'iterations': self.train_iterations,
-                     'loss': loss,
-
-                     }
+                self.training_logs = pd.concat([self.training_logs,
+                    pd.DataFrame({'iterations': [self.train_iterations], 'loss': [loss],})
                 ], ignore_index=True)
 
             if loss < best_loss:
@@ -89,9 +107,14 @@ class Experiment:
             b = self.batchsize
         x, y, lines = self.samples_generator.generate(b=b, h=self.sample_height,
                                                       y_width=3, subsample=2, device='cuda')
+
+        if self.secondary_generator:
+            x2, _, _ = self.secondary_generator.generate(b=b, h=self.sample_height,
+                                                         y_width=3, subsample=2, device='cuda')
+            x = x2 * self.secondary_gen_mix + x * (1 - self.secondary_gen_mix)
+
         x = x[:, None].float()
         y = y[:, None].float()
-
         x_noise = torch.randn_like(x)*self.noise_std + self.noise_avg
 
         return x+x_noise, y

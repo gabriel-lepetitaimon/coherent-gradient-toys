@@ -17,10 +17,12 @@ class SampleGenerator:
 
             shape = (nlines, b)
             orientation = self.orientation(shape) if callable(self.orientation) else self.orientation
-            if isinstance(orientation, int):
+            if isinstance(orientation, (int, float)):
                 orientation = torch.Tensor([orientation])
                 while orientation.ndim < 2:
                     orientation = orientation[None]
+            elif isinstance(orientation, tuple):
+                orientation = torch.rand(shape, device=device)*(orientation[1]-orientation[0]) + orientation[0]
             orientation = orientation.to(device)
             
             length = self.length(shape) if callable(self.length) else self.length
